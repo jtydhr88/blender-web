@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Fetch pinned Blender source (shallow)
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
         run: |
           UPSTREAM=$(tr -d '[:space:]' < UPSTREAM_COMMIT)
           echo "pinned upstream: $UPSTREAM"
