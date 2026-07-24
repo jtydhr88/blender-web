@@ -1,0 +1,939 @@
+diff --git a/.gitignore b/.gitignore
+index f6f66a4e48c..1ca466b29b9 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -89,3 +89,4 @@ compile_commands.json
+ blendcache_*
+ *.blend1
+ *.blend2
++build_web/
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 93ff49c347b..1074d4dc1df 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -371,6 +371,18 @@ endif()
+ option(WITH_HEADLESS "Build without graphical support (renderfarm, server mode only)" OFF)
+ mark_as_advanced(WITH_HEADLESS)
+ 
++option(WITH_GHOST_WEB "\
++Enable building Blender with a Web display backend (browser as window via WebSocket)"
++  OFF
++)
++mark_as_advanced(WITH_GHOST_WEB)
++
++option(WITH_WEB_NVENC "\
++Enable NVENC H.264 hardware encoding for Web display (requires NVIDIA GPU)"
++  OFF
++)
++mark_as_advanced(WITH_WEB_NVENC)
++
+ option(WITH_QUADRIFLOW "Build with QuadriFlow remesher support" ON)
+ 
+ option(WITH_AUDASPACE "Build with Audaspace (base Blender audio library)" ON)
+@@ -1347,14 +1359,18 @@ if(UNIX AND NOT (APPLE OR HAIKU))
+   set_and_warn_incompatible(WITH_HEADLESS WITH_GHOST_X11 OFF)
+ endif()
+ set_and_warn_incompatible(WITH_HEADLESS WITH_GHOST_SDL OFF)
++set_and_warn_incompatible(WITH_GHOST_WEB WITH_HEADLESS OFF)
++set_and_warn_incompatible(WITH_GHOST_WEB WITH_GHOST_SDL OFF)
+ 
+ if(WITH_INPUT_IME)
+   set_and_warn_incompatible(WITH_HEADLESS WITH_INPUT_IME OFF)
+   set_and_warn_incompatible(WITH_GHOST_SDL WITH_INPUT_IME OFF)
++  set_and_warn_incompatible(WITH_GHOST_WEB WITH_INPUT_IME OFF)
+ endif()
+ 
+ set_and_warn_incompatible(WITH_HEADLESS WITH_XR_OPENXR OFF)
+ set_and_warn_incompatible(WITH_GHOST_SDL WITH_XR_OPENXR OFF)
++set_and_warn_incompatible(WITH_GHOST_WEB WITH_XR_OPENXR OFF)
+ 
+ if(WITH_UI_TESTS_HEADLESS)
+   set_and_warn_dependency(WITH_GHOST_WAYLAND WITH_UI_TESTS_HEADLESS OFF)
+diff --git a/build_files/cmake/platform/platform_win32.cmake b/build_files/cmake/platform/platform_win32.cmake
+index 3b0a244f1e3..74d97f27b22 100644
+--- a/build_files/cmake/platform/platform_win32.cmake
++++ b/build_files/cmake/platform/platform_win32.cmake
+@@ -39,7 +39,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+   endif()
+ else()
+   if(WITH_BLENDER)
+-    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19.44.35216) # MSVC 2022 17.14.14
++    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19.44.35200) # MSVC 2022 17.14 (relaxed)
+       message(FATAL_ERROR
+         "Compiler is unsupported, MSVC 2022 17.14.14 or newer is required for building blender."
+       )
+diff --git a/extern/CMakeLists.txt b/extern/CMakeLists.txt
+index 0f4b2e0f508..a6d936de7a2 100644
+--- a/extern/CMakeLists.txt
++++ b/extern/CMakeLists.txt
+@@ -59,9 +59,18 @@ if(WITH_BINRELOC)
+   add_subdirectory(binreloc)
+ endif()
+ 
++if(WITH_GHOST_WEB AND WITH_WEB_NVENC)
++  add_subdirectory(nvew)
++  if(NOT TARGET extern_cuew)
++    add_subdirectory(cuew)
++  endif()
++endif()
++
+ if(WITH_CYCLES OR WITH_OPENSUBDIV)
+   if((WITH_CYCLES_DEVICE_CUDA OR WITH_CYCLES_DEVICE_OPTIX) AND WITH_CUDA_DYNLOAD)
+-    add_subdirectory(cuew)
++    if(NOT TARGET extern_cuew)
++      add_subdirectory(cuew)
++    endif()
+   endif()
+   if(WITH_CYCLES_DEVICE_HIP AND WITH_HIP_DYNLOAD)
+     add_subdirectory(hipew)
+diff --git a/intern/ghost/CMakeLists.txt b/intern/ghost/CMakeLists.txt
+index 06fc1409bdf..e1af9f5ccd8 100644
+--- a/intern/ghost/CMakeLists.txt
++++ b/intern/ghost/CMakeLists.txt
+@@ -137,7 +137,51 @@ list(APPEND SRC
+   intern/GHOST_WindowNULL.hh
+ )
+ 
+-if(WITH_HEADLESS)
++if(WITH_GHOST_WEB)
++  list(APPEND SRC
++    intern/GHOST_SystemWeb.cc
++    intern/GHOST_WindowWeb.cc
++
++    intern/GHOST_SystemWeb.hh
++    intern/GHOST_WindowWeb.hh
++  )
++  add_definitions(-DWITH_GHOST_WEB)
++
++  list(APPEND SRC
++    intern/GHOST_Encoder.hh
++  )
++
++  list(APPEND LIB
++    PRIVATE bf::dependencies::jpeg
++  )
++
++  if(WITH_WEB_NVENC)
++    list(APPEND SRC
++      intern/GHOST_EncoderNVENC.cc
++      intern/GHOST_EncoderNVENC.hh
++    )
++    list(APPEND INC_SYS
++      ../../extern/cuew/include
++      ../../extern/nvew/include
++    )
++    list(APPEND LIB
++      extern_nvew
++      extern_cuew
++    )
++    add_definitions(-DWITH_WEB_NVENC)
++  endif()
++
++  if(WIN32)
++    list(APPEND LIB
++      ws2_32
++    )
++    # Reuse WGL context for offscreen OpenGL on Windows.
++    list(APPEND SRC
++      intern/GHOST_ContextWGL.cc
++      intern/GHOST_ContextWGL.hh
++    )
++  endif()
++elseif(WITH_HEADLESS)
+   add_definitions(-DWITH_HEADLESS)
+ elseif(WITH_GHOST_SDL)
+   list(APPEND SRC
+diff --git a/intern/ghost/intern/GHOST_ContextVK.cc b/intern/ghost/intern/GHOST_ContextVK.cc
+index e92c551608d..e8e1ecdcf82 100644
+--- a/intern/ghost/intern/GHOST_ContextVK.cc
++++ b/intern/ghost/intern/GHOST_ContextVK.cc
+@@ -923,6 +923,10 @@ GHOST_TSuccess GHOST_ContextVK::swapBufferAcquire()
+     return GHOST_kFailure;
+   }
+ 
++  if (use_virtual_swapchain_) {
++    return swapBufferAcquireVirtual();
++  }
++
+   GHOST_DeviceVK &device_vk = vulkan_instance->device.value();
+   VkDevice vk_device = device_vk.vk_device;
+ 
+@@ -1073,6 +1077,10 @@ void GHOST_ContextVK::setPresentFence(VkSwapchainKHR swapchain, VkFence present_
+ 
+ GHOST_TSuccess GHOST_ContextVK::swapBufferRelease()
+ {
++  if (use_virtual_swapchain_) {
++    return swapBufferReleaseVirtual();
++  }
++
+   /* Minimized windows don't have a swapchain and swapchain image. In this case we perform the draw
+    * to release render graph and discarded resources. */
+   if (swapchain_ == VK_NULL_HANDLE) {
+@@ -1637,6 +1645,14 @@ GHOST_TSuccess GHOST_ContextVK::destroySwapchain()
+ {
+   GHOST_DeviceVK &device_vk = vulkan_instance.value().device.value();
+ 
++  if (use_virtual_swapchain_) {
++    /* Stop the harvest thread, then destroy the self-allocated images and slot buffers;
++     * the semaphores/fences below are shared with the regular code path and destroyed
++     * as usual. */
++    stopVirtualHarvest();
++    destroyVirtualSwapchain();
++  }
++
+   if (swapchain_ != VK_NULL_HANDLE) {
+     this->destroySwapchainPresentFences(swapchain_);
+     device_vk.functions.vkDestroySwapchainKHR(device_vk.vk_device, swapchain_, nullptr);
+@@ -1657,6 +1673,547 @@ GHOST_TSuccess GHOST_ContextVK::destroySwapchain()
+   return GHOST_kSuccess;
+ }
+ 
++/* -------------------------------------------------------------------- */
++/** \name Virtual swap-chain (headless presentation)
++ *
++ * Used by display backends without a native surface (e.g. the Web display backend).
++ * Rendering happens into self-allocated images; after each swap the result is
++ * downloaded into a host-visible buffer and handed to a callback.
++ * \{ */
++
++static uint32_t vk_find_memory_type(VkPhysicalDevice physical_device,
++                                    uint32_t type_bits,
++                                    VkMemoryPropertyFlags properties)
++{
++  VkPhysicalDeviceMemoryProperties memory_properties;
++  volk::vkGetPhysicalDeviceMemoryProperties(physical_device, &memory_properties);
++  for (uint32_t index = 0; index < memory_properties.memoryTypeCount; index++) {
++    if ((type_bits & (1u << index)) &&
++        (memory_properties.memoryTypes[index].propertyFlags & properties) == properties)
++    {
++      return index;
++    }
++  }
++  return UINT32_MAX;
++}
++
++GHOST_TSuccess GHOST_ContextVK::initVirtualSwapchain(
++    uint32_t width,
++    uint32_t height,
++    std::function<void(const GHOST_VirtualFrame &)> present_callback,
++    std::function<void()> teardown_callback)
++{
++  if (!vulkan_instance.has_value() || !vulkan_instance->device.has_value()) {
++    return GHOST_kFailure;
++  }
++  use_virtual_swapchain_ = true;
++  virtual_extent_requested_ = {std::max(width, 1u), std::max(height, 1u)};
++  virtual_present_callback_ = present_callback;
++  virtual_teardown_callback_ = teardown_callback;
++  virtual_harvest_exit_ = false;
++  virtual_harvest_thread_ = std::thread(&GHOST_ContextVK::virtualHarvestLoop, this);
++  return GHOST_kSuccess;
++}
++
++void GHOST_ContextVK::resizeVirtualSwapchain(uint32_t width, uint32_t height)
++{
++  virtual_extent_requested_ = {std::max(width, 1u), std::max(height, 1u)};
++}
++
++uint32_t GHOST_ContextVK::getVirtualSlotCount() const
++{
++  return uint32_t(virtual_slots_.size());
++}
++
++uint64_t GHOST_ContextVK::getVirtualGeneration() const
++{
++  return virtual_generation_;
++}
++
++GHOST_TSuccess GHOST_ContextVK::getVirtualSlotExport(uint32_t slot,
++                                                     GHOST_VirtualSlotExport &r_export) const
++{
++  if (slot >= virtual_slots_.size() || virtual_slots_[slot].export_win32_handle == nullptr) {
++    return GHOST_kFailure;
++  }
++  r_export.win32_handle = virtual_slots_[slot].export_win32_handle;
++  r_export.size = virtual_slots_[slot].export_size;
++  r_export.pitch = virtual_pitch_;
++  return GHOST_kSuccess;
++}
++
++void GHOST_ContextVK::virtualHarvestLoop()
++{
++  for (;;) {
++    uint32_t slot_index;
++    {
++      std::unique_lock<std::mutex> lock(virtual_mutex_);
++      virtual_cv_.wait(
++          lock, [this] { return virtual_harvest_exit_ || !virtual_harvest_queue_.empty(); });
++      if (virtual_harvest_exit_) {
++        break;
++      }
++      slot_index = virtual_harvest_queue_.front();
++      virtual_harvest_queue_.pop_front();
++    }
++
++    GHOST_DeviceVK &device_vk = vulkan_instance.value().device.value();
++    VirtualSlot &slot = virtual_slots_[slot_index];
++    device_vk.functions.vkWaitForFences(
++        device_vk.vk_device, 1, &slot.copy_fence, true, UINT64_MAX);
++    device_vk.functions.vkResetFences(device_vk.vk_device, 1, &slot.copy_fence);
++    vmaInvalidateAllocation(device_vk.vma_allocator, slot.host_allocation, 0, VK_WHOLE_SIZE);
++
++    if (virtual_present_callback_) {
++      GHOST_VirtualFrame frame = {};
++      frame.host_pixels = static_cast<const uint8_t *>(slot.host_mapped);
++      frame.width = render_extent_.width;
++      frame.height = render_extent_.height;
++      frame.pitch = virtual_pitch_;
++      frame.slot = slot_index;
++      frame.generation = virtual_generation_;
++      virtual_present_callback_(frame);
++    }
++
++    {
++      std::lock_guard<std::mutex> lock(virtual_mutex_);
++      slot.pending = false;
++    }
++    virtual_cv_.notify_all();
++  }
++}
++
++void GHOST_ContextVK::drainVirtualHarvest()
++{
++  if (!virtual_harvest_thread_.joinable()) {
++    /* Thread already stopped (shutdown): leftover copies are covered by wait_idle. */
++    std::lock_guard<std::mutex> lock(virtual_mutex_);
++    virtual_harvest_queue_.clear();
++    for (VirtualSlot &slot : virtual_slots_) {
++      slot.pending = false;
++    }
++    return;
++  }
++  std::unique_lock<std::mutex> lock(virtual_mutex_);
++  virtual_cv_.wait(lock, [this] {
++    if (!virtual_harvest_queue_.empty()) {
++      return false;
++    }
++    for (const VirtualSlot &slot : virtual_slots_) {
++      if (slot.pending) {
++        return false;
++      }
++    }
++    return true;
++  });
++}
++
++void GHOST_ContextVK::shutdownVirtualPresentation()
++{
++  stopVirtualHarvest();
++  virtual_present_callback_ = nullptr;
++}
++
++void GHOST_ContextVK::stopVirtualHarvest()
++{
++  if (!virtual_harvest_thread_.joinable()) {
++    return;
++  }
++  drainVirtualHarvest();
++  {
++    std::lock_guard<std::mutex> lock(virtual_mutex_);
++    virtual_harvest_exit_ = true;
++  }
++  virtual_cv_.notify_all();
++  virtual_harvest_thread_.join();
++}
++
++void GHOST_ContextVK::destroyVirtualSwapchain()
++{
++  GHOST_DeviceVK &device_vk = vulkan_instance.value().device.value();
++
++  drainVirtualHarvest();
++
++  /* Let the consumer release external imports (CUDA/NVENC) before freeing the memory. */
++  if (virtual_teardown_callback_ && !virtual_slots_.empty()) {
++    virtual_teardown_callback_();
++  }
++
++  device_vk.wait_idle();
++
++  for (size_t index = 0; index < virtual_image_allocations_.size(); index++) {
++    if (index < swapchain_images_.size() && swapchain_images_[index].vk_image != VK_NULL_HANDLE) {
++      vmaDestroyImage(device_vk.vma_allocator,
++                      swapchain_images_[index].vk_image,
++                      virtual_image_allocations_[index]);
++      swapchain_images_[index].vk_image = VK_NULL_HANDLE;
++    }
++  }
++  virtual_image_allocations_.clear();
++
++  for (VirtualSlot &slot : virtual_slots_) {
++#ifdef _WIN32
++    if (slot.export_win32_handle) {
++      CloseHandle(HANDLE(slot.export_win32_handle));
++      slot.export_win32_handle = nullptr;
++    }
++#endif
++    if (slot.export_buffer != VK_NULL_HANDLE) {
++      device_vk.functions.vkDestroyBuffer(device_vk.vk_device, slot.export_buffer, nullptr);
++      device_vk.functions.vkFreeMemory(device_vk.vk_device, slot.export_memory, nullptr);
++    }
++    if (slot.host_buffer != VK_NULL_HANDLE) {
++      vmaDestroyBuffer(device_vk.vma_allocator, slot.host_buffer, slot.host_allocation);
++    }
++    if (slot.copy_fence != VK_NULL_HANDLE) {
++      device_vk.functions.vkDestroyFence(device_vk.vk_device, slot.copy_fence, nullptr);
++    }
++  }
++  virtual_slots_.clear();
++
++  if (virtual_command_pool_ != VK_NULL_HANDLE) {
++    device_vk.functions.vkDestroyCommandPool(device_vk.vk_device, virtual_command_pool_, nullptr);
++    virtual_command_pool_ = VK_NULL_HANDLE;
++  }
++}
++
++GHOST_TSuccess GHOST_ContextVK::recreateVirtualSwapchain()
++{
++  GHOST_DeviceVK &device_vk = vulkan_instance.value().device.value();
++  VkDevice vk_device = device_vk.vk_device;
++
++  /* Waits for the harvest queue and the device to be idle,
++   * safe to destroy in-flight resources. */
++  destroyVirtualSwapchain();
++
++  render_extent_ = virtual_extent_requested_;
++  render_extent_min_ = {1, 1};
++  surface_format_ = {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
++
++  /* Rows are padded for encoder pitch alignment (256 bytes), the buffer gets one
++   * extra row when the height is odd (H.264 encoders read even dimensions). */
++  const uint32_t pitch_pixels = (render_extent_.width + 63u) & ~63u;
++  const uint32_t buffer_rows = (render_extent_.height + 1u) & ~1u;
++  virtual_pitch_ = pitch_pixels * 4;
++  const VkDeviceSize buffer_size = VkDeviceSize(virtual_pitch_) * buffer_rows;
++
++  const uint32_t image_count = 2;
++
++  VkImageCreateInfo image_create_info = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++  image_create_info.imageType = VK_IMAGE_TYPE_2D;
++  image_create_info.format = surface_format_.format;
++  image_create_info.extent = {render_extent_.width, render_extent_.height, 1};
++  image_create_info.mipLevels = 1;
++  image_create_info.arrayLayers = 1;
++  image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
++  image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
++  image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++  image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++  image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++
++  swapchain_images_.resize(image_count);
++  virtual_image_allocations_.resize(image_count, nullptr);
++  for (uint32_t index = 0; index < image_count; index++) {
++    VmaAllocationCreateInfo allocation_create_info = {};
++    allocation_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
++    VK_CHECK(vmaCreateImage(device_vk.vma_allocator,
++                            &image_create_info,
++                            &allocation_create_info,
++                            &swapchain_images_[index].vk_image,
++                            &virtual_image_allocations_[index],
++                            nullptr),
++             GHOST_kFailure);
++  }
++
++  VkCommandPoolCreateInfo pool_create_info = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
++  pool_create_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
++  pool_create_info.queueFamilyIndex = device_vk.generic_queue_family;
++  VK_CHECK(device_vk.functions.vkCreateCommandPool(
++               vk_device, &pool_create_info, nullptr, &virtual_command_pool_),
++           GHOST_kFailure);
++
++#ifdef _WIN32
++  const bool use_export = device_vk.extensions.is_enabled(
++      VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
++#else
++  const bool use_export = false;
++#endif
++
++  virtual_slots_.resize(image_count);
++  for (uint32_t index = 0; index < image_count; index++) {
++    VirtualSlot &slot = virtual_slots_[index];
++
++#ifdef _WIN32
++    if (use_export) {
++      /* Device-local exportable buffer (imported by CUDA for zero-copy NVENC input).
++       * Allocated manually (not VMA): needs export info + dedicated allocation. */
++      VkExternalMemoryBufferCreateInfo external_buffer_info = {
++          VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
++      external_buffer_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++      VkBufferCreateInfo export_buffer_create_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++      export_buffer_create_info.pNext = &external_buffer_info;
++      export_buffer_create_info.size = buffer_size;
++      export_buffer_create_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++      export_buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++      VK_CHECK(device_vk.functions.vkCreateBuffer(
++                   vk_device, &export_buffer_create_info, nullptr, &slot.export_buffer),
++               GHOST_kFailure);
++
++      VkMemoryRequirements memory_requirements;
++      device_vk.functions.vkGetBufferMemoryRequirements(
++          vk_device, slot.export_buffer, &memory_requirements);
++      const uint32_t memory_type = vk_find_memory_type(device_vk.vk_physical_device,
++                                                       memory_requirements.memoryTypeBits,
++                                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++      if (memory_type == UINT32_MAX) {
++        return GHOST_kFailure;
++      }
++
++      VkMemoryDedicatedAllocateInfo dedicated_info = {
++          VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
++      dedicated_info.buffer = slot.export_buffer;
++      VkExportMemoryAllocateInfo export_info = {VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
++      export_info.pNext = &dedicated_info;
++      export_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++      VkMemoryAllocateInfo allocate_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++      allocate_info.pNext = &export_info;
++      allocate_info.allocationSize = memory_requirements.size;
++      allocate_info.memoryTypeIndex = memory_type;
++      VK_CHECK(device_vk.functions.vkAllocateMemory(
++                   vk_device, &allocate_info, nullptr, &slot.export_memory),
++               GHOST_kFailure);
++      VK_CHECK(device_vk.functions.vkBindBufferMemory(
++                   vk_device, slot.export_buffer, slot.export_memory, 0),
++               GHOST_kFailure);
++      slot.export_size = memory_requirements.size;
++
++      VkMemoryGetWin32HandleInfoKHR handle_info = {
++          VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR};
++      handle_info.memory = slot.export_memory;
++      handle_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++      HANDLE win32_handle = nullptr;
++      VK_CHECK(device_vk.functions.vkGetMemoryWin32HandleKHR(
++                   vk_device, &handle_info, &win32_handle),
++               GHOST_kFailure);
++      slot.export_win32_handle = win32_handle;
++    }
++#endif
++
++    /* Host-visible buffer (CPU fallback path), persistently mapped. */
++    VkBufferCreateInfo host_buffer_create_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++    host_buffer_create_info.size = buffer_size;
++    host_buffer_create_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++    host_buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++    VmaAllocationCreateInfo host_allocation_create_info = {};
++    host_allocation_create_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
++                                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
++    host_allocation_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
++    VmaAllocationInfo host_allocation_info = {};
++    VK_CHECK(vmaCreateBuffer(device_vk.vma_allocator,
++                             &host_buffer_create_info,
++                             &host_allocation_create_info,
++                             &slot.host_buffer,
++                             &slot.host_allocation,
++                             &host_allocation_info),
++             GHOST_kFailure);
++    slot.host_mapped = host_allocation_info.pMappedData;
++
++    VkCommandBufferAllocateInfo command_buffer_allocate_info = {
++        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
++    command_buffer_allocate_info.commandPool = virtual_command_pool_;
++    command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++    command_buffer_allocate_info.commandBufferCount = 1;
++    VK_CHECK(device_vk.functions.vkAllocateCommandBuffers(
++                 vk_device, &command_buffer_allocate_info, &slot.command_buffer),
++             GHOST_kFailure);
++
++    const VkFenceCreateInfo fence_create_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
++    VK_CHECK(device_vk.functions.vkCreateFence(
++                 vk_device, &fence_create_info, nullptr, &slot.copy_fence),
++             GHOST_kFailure);
++
++    /* Zero-fill both buffers once so padding rows/columns encode as black. */
++    VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    device_vk.functions.vkBeginCommandBuffer(slot.command_buffer, &begin_info);
++    if (slot.export_buffer != VK_NULL_HANDLE) {
++      device_vk.functions.vkCmdFillBuffer(
++          slot.command_buffer, slot.export_buffer, 0, VK_WHOLE_SIZE, 0);
++    }
++    device_vk.functions.vkCmdFillBuffer(
++        slot.command_buffer, slot.host_buffer, 0, VK_WHOLE_SIZE, 0);
++    device_vk.functions.vkEndCommandBuffer(slot.command_buffer);
++    VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
++    submit_info.commandBufferCount = 1;
++    submit_info.pCommandBuffers = &slot.command_buffer;
++    {
++      std::scoped_lock lock(device_vk.queue_mutex);
++      device_vk.functions.vkQueueSubmit(
++          device_vk.generic_queue, 1, &submit_info, slot.copy_fence);
++    }
++    device_vk.functions.vkWaitForFences(vk_device, 1, &slot.copy_fence, true, UINT64_MAX);
++    device_vk.functions.vkResetFences(vk_device, 1, &slot.copy_fence);
++  }
++
++  initializeFrameData();
++  image_count_ = image_count;
++  virtual_generation_++;
++
++  CLOG_DEBUG(&LOG,
++             "Vulkan: recreated virtual swapchain: width=%u, height=%u, pitch=%u, export=%d, "
++             "generation=%" PRIu64,
++             render_extent_.width,
++             render_extent_.height,
++             virtual_pitch_,
++             int(use_export),
++             virtual_generation_);
++
++  return GHOST_kSuccess;
++}
++
++GHOST_TSuccess GHOST_ContextVK::swapBufferAcquireVirtual()
++{
++  GHOST_DeviceVK &device_vk = vulkan_instance->device.value();
++  VkDevice vk_device = device_vk.vk_device;
++
++  render_frame_ = (render_frame_ + 1) % frame_data_.size();
++  GHOST_Frame &submission_frame_data = frame_data_[render_frame_];
++  /* Wait for the previous use of this frame to finish rendering (see #swapBufferAcquire). */
++  if (submission_frame_data.submission_fence != VK_NULL_HANDLE) {
++    device_vk.functions.vkWaitForFences(
++        vk_device, 1, &submission_frame_data.submission_fence, true, UINT64_MAX);
++  }
++  submission_frame_data.discard_pile.destroy(vk_device, device_vk.functions);
++
++  if (swapchain_images_.empty() || render_extent_.width != virtual_extent_requested_.width ||
++      render_extent_.height != virtual_extent_requested_.height)
++  {
++    if (recreateVirtualSwapchain() != GHOST_kSuccess) {
++      return GHOST_kFailure;
++    }
++  }
++
++  acquired_swapchain_image_index_ = uint32_t(render_frame_ % swapchain_images_.size());
++
++  if (swap_buffer_acquired_callback_) {
++    swap_buffer_acquired_callback_();
++  }
++  return GHOST_kSuccess;
++}
++
++GHOST_TSuccess GHOST_ContextVK::swapBufferReleaseVirtual()
++{
++  if (!acquired_swapchain_image_index_.has_value()) {
++    assert(false);
++    return GHOST_kFailure;
++  }
++  GHOST_DeviceVK &device_vk = vulkan_instance->device.value();
++  VkDevice vk_device = device_vk.vk_device;
++
++  const uint32_t image_index = acquired_swapchain_image_index_.value();
++  acquired_swapchain_image_index_.reset();
++  GHOST_SwapchainImage &swapchain_image = swapchain_images_[image_index];
++  GHOST_Frame &submission_frame_data = frame_data_[render_frame_];
++  VirtualSlot &slot = virtual_slots_[image_index];
++
++  /* Wait until the harvest thread has delivered the slot's previous frame before
++   * reusing its command buffer/fence/buffers. Provides natural back-pressure when
++   * the consumer (encoder/network) is slower than the producer. */
++  {
++    std::unique_lock<std::mutex> lock(virtual_mutex_);
++    virtual_cv_.wait(lock, [&slot] { return !slot.pending; });
++  }
++
++  GHOST_VulkanSwapChainData swap_chain_data = {};
++  swap_chain_data.image = swapchain_image.vk_image;
++  swap_chain_data.surface_format = surface_format_;
++  swap_chain_data.extent = render_extent_;
++  swap_chain_data.submission_fence = submission_frame_data.submission_fence;
++  /* No acquire semaphore: nothing signals it without a native swap-chain (the
++   * submission layer handles a null wait semaphore). The present semaphore is
++   * signaled by the GPU backend's submit and orders our copy below GPU-side. */
++  swap_chain_data.acquire_semaphore = VK_NULL_HANDLE;
++  swap_chain_data.present_semaphore = swapchain_image.present_semaphore;
++  swap_chain_data.sdr_scale = 1.0f;
++
++  device_vk.functions.vkResetFences(vk_device, 1, &submission_frame_data.submission_fence);
++  if (swap_buffer_draw_callback_) {
++    swap_buffer_draw_callback_(&swap_chain_data, true);
++  }
++
++  /* Record and submit the download without waiting for the draw on the CPU:
++   * the copy waits for the present semaphore on the GPU. The harvest thread
++   * waits for the copy fence and delivers the frame. */
++  VkCommandBufferBeginInfo begin_info = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++  begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++  device_vk.functions.vkResetCommandBuffer(slot.command_buffer, 0);
++  device_vk.functions.vkBeginCommandBuffer(slot.command_buffer, &begin_info);
++
++  VkImageMemoryBarrier barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++  barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
++  barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++  barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++  barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++  barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++  barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++  barrier.image = swapchain_image.vk_image;
++  barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++  device_vk.functions.vkCmdPipelineBarrier(slot.command_buffer,
++                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                                           VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                           0,
++                                           0,
++                                           nullptr,
++                                           0,
++                                           nullptr,
++                                           1,
++                                           &barrier);
++
++  VkBufferImageCopy copy_region = {};
++  copy_region.bufferRowLength = virtual_pitch_ / 4;
++  copy_region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++  copy_region.imageExtent = {render_extent_.width, render_extent_.height, 1};
++  if (slot.export_buffer != VK_NULL_HANDLE) {
++    device_vk.functions.vkCmdCopyImageToBuffer(slot.command_buffer,
++                                               swapchain_image.vk_image,
++                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                                               slot.export_buffer,
++                                               1,
++                                               &copy_region);
++  }
++  device_vk.functions.vkCmdCopyImageToBuffer(slot.command_buffer,
++                                             swapchain_image.vk_image,
++                                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++                                             slot.host_buffer,
++                                             1,
++                                             &copy_region);
++  device_vk.functions.vkEndCommandBuffer(slot.command_buffer);
++
++  const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
++  VkSubmitInfo submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
++  submit_info.waitSemaphoreCount = 1;
++  submit_info.pWaitSemaphores = &swapchain_image.present_semaphore;
++  submit_info.pWaitDstStageMask = &wait_stage;
++  submit_info.commandBufferCount = 1;
++  submit_info.pCommandBuffers = &slot.command_buffer;
++  {
++    std::scoped_lock lock(device_vk.queue_mutex);
++    device_vk.functions.vkQueueSubmit(
++        device_vk.generic_queue, 1, &submit_info, slot.copy_fence);
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(virtual_mutex_);
++    slot.pending = true;
++    virtual_harvest_queue_.push_back(image_index);
++  }
++  virtual_cv_.notify_all();
++
++  return GHOST_kSuccess;
++}
++
++/** \} */
++
+ const char *GHOST_ContextVK::getPlatformSpecificSurfaceExtension() const
+ {
+ #ifdef _WIN32
+diff --git a/intern/ghost/intern/GHOST_ContextVK.hh b/intern/ghost/intern/GHOST_ContextVK.hh
+index 856f959b5bc..72b1233b023 100644
+--- a/intern/ghost/intern/GHOST_ContextVK.hh
++++ b/intern/ghost/intern/GHOST_ContextVK.hh
+@@ -34,8 +34,12 @@
+ #  endif
+ #endif
+ 
++#include <condition_variable>
++#include <deque>
+ #include <map>
++#include <mutex>
+ #include <optional>
++#include <thread>
+ #include <vector>
+ 
+ namespace blender {
+@@ -54,6 +58,10 @@ namespace volk {
+ struct VolkDeviceTable;
+ }
+ 
++/* Forward declaration matching the VK_DEFINE_HANDLE based definition in `vk_mem_alloc.h`. */
++struct VmaAllocation_T;
++using VmaAllocation = VmaAllocation_T *;
++
+ enum GHOST_TVulkanPlatformType {
+   GHOST_kVulkanPlatformHeadless = 0,
+ #ifdef WITH_GHOST_X11
+@@ -68,6 +76,35 @@ struct GHOST_ContextVK_WindowInfo {
+   int size[2];
+ };
+ 
++/**
++ * A frame delivered by the virtual swap-chain (see #GHOST_ContextVK::initVirtualSwapchain).
++ */
++struct GHOST_VirtualFrame {
++  /** Host-visible RGBA pixels, top-down rows, `pitch` bytes apart. */
++  const uint8_t *host_pixels;
++  uint32_t width;
++  uint32_t height;
++  /** Row stride in bytes (rows are padded for encoder pitch alignment). */
++  uint32_t pitch;
++  /** Buffer slot index, identifies the external buffer for the zero-copy path. */
++  uint32_t slot;
++  /** Increments whenever the virtual swap-chain is recreated (resize). */
++  uint64_t generation;
++};
++
++/**
++ * Export info of a virtual swap-chain slot's device-local buffer, for importing
++ * into an external API (CUDA) without a host round-trip.
++ */
++struct GHOST_VirtualSlotExport {
++  /** HANDLE of the exportable device memory (Windows only, null elsewhere). */
++  void *win32_handle;
++  /** Size of the memory allocation in bytes. */
++  uint64_t size;
++  /** Row stride in bytes. */
++  uint32_t pitch;
++};
++
+ struct GHOST_FrameDiscard {
+   std::vector<VkSwapchainKHR> swapchains;
+   std::vector<VkSemaphore> semaphores;
+@@ -176,6 +213,48 @@ class GHOST_ContextVK : public GHOST_Context {
+ 
+   GHOST_TSuccess getVulkanSwapChainFormat(GHOST_VulkanSwapChainData *r_swap_chain_data) override;
+ 
++  /**
++   * Enable the virtual swap-chain: a headless presentation target for display backends
++   * without a native surface (e.g. the Web display backend).
++   *
++   * Instead of presenting to a native surface the context renders into self-allocated
++   * images. After each #swapBufferRelease the result is copied (on the GPU, ordered by
++   * the present semaphore — the main thread does not wait) into a device-local
++   * exportable buffer and a host-visible buffer. A harvest thread waits for the copy
++   * and invokes \a present_callback with a #GHOST_VirtualFrame.
++   *
++   * \a teardown_callback is invoked before the slot buffers are destroyed
++   * (resize/shutdown) so external imports (CUDA) can be released first.
++   *
++   * Must be called after #initializeDrawingContext, before the first #swapBufferAcquire.
++   */
++  GHOST_TSuccess initVirtualSwapchain(uint32_t width,
++                                      uint32_t height,
++                                      std::function<void(const GHOST_VirtualFrame &)>
++                                          present_callback,
++                                      std::function<void()> teardown_callback);
++
++  /** Request a new virtual swap-chain size (applied on the next #swapBufferAcquire). */
++  void resizeVirtualSwapchain(uint32_t width, uint32_t height);
++
++  /** Number of virtual swap-chain buffer slots. */
++  uint32_t getVirtualSlotCount() const;
++
++  /** Current virtual swap-chain generation (increments on every recreation). */
++  uint64_t getVirtualGeneration() const;
++
++  /**
++   * Export info for a slot's device-local buffer (for CUDA import).
++   * Fails when external memory export is unavailable.
++   */
++  GHOST_TSuccess getVirtualSlotExport(uint32_t slot, GHOST_VirtualSlotExport &r_export) const;
++
++  /**
++   * Stop frame delivery (joins the harvest thread). Call before destroying the
++   * present callback's target, e.g. from the owning window's destructor.
++   */
++  void shutdownVirtualPresentation();
++
+   GHOST_TSuccess setVulkanSwapBuffersCallbacks(
+       std::function<void(const GHOST_VulkanSwapChainData *, bool)> swap_buffer_draw_callback,
+       std::function<void(void)> swap_buffer_acquired_callback,
+@@ -287,11 +366,52 @@ class GHOST_ContextVK : public GHOST_Context {
+   std::vector<VkFence> fence_pile_;
+   std::map<VkSwapchainKHR, std::vector<VkFence>> present_fences_;
+ 
++  /* Virtual swap-chain (headless presentation, see #initVirtualSwapchain). */
++  struct VirtualSlot {
++    /** Device-local exportable buffer (zero-copy encoder input). */
++    VkBuffer export_buffer = VK_NULL_HANDLE;
++    VkDeviceMemory export_memory = VK_NULL_HANDLE;
++    uint64_t export_size = 0;
++    void *export_win32_handle = nullptr;
++    /** Host-visible buffer (CPU fallback: JPEG, no NVENC). */
++    VkBuffer host_buffer = VK_NULL_HANDLE;
++    VmaAllocation host_allocation = nullptr;
++    void *host_mapped = nullptr;
++    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
++    VkFence copy_fence = VK_NULL_HANDLE;
++    /** Copy submitted, harvest not yet delivered (guarded by #virtual_mutex_). */
++    bool pending = false;
++  };
++
++  bool use_virtual_swapchain_ = false;
++  VkExtent2D virtual_extent_requested_ = {0, 0};
++  uint32_t virtual_pitch_ = 0;
++  uint64_t virtual_generation_ = 0;
++  std::vector<VmaAllocation> virtual_image_allocations_;
++  std::vector<VirtualSlot> virtual_slots_;
++  VkCommandPool virtual_command_pool_ = VK_NULL_HANDLE;
++  std::function<void(const GHOST_VirtualFrame &)> virtual_present_callback_;
++  std::function<void()> virtual_teardown_callback_;
++
++  std::thread virtual_harvest_thread_;
++  std::mutex virtual_mutex_;
++  std::condition_variable virtual_cv_;
++  std::deque<uint32_t> virtual_harvest_queue_;
++  bool virtual_harvest_exit_ = false;
++
+   const char *getPlatformSpecificSurfaceExtension() const;
+   GHOST_TSuccess recreateSwapchain(bool use_hdr_swapchain);
+   GHOST_TSuccess initializeFrameData();
+   GHOST_TSuccess destroySwapchain();
+ 
++  GHOST_TSuccess swapBufferAcquireVirtual();
++  GHOST_TSuccess swapBufferReleaseVirtual();
++  GHOST_TSuccess recreateVirtualSwapchain();
++  void destroyVirtualSwapchain();
++  void drainVirtualHarvest();
++  void stopVirtualHarvest();
++  void virtualHarvestLoop();
++
+   VkFence getFence();
+   void setPresentFence(VkSwapchainKHR swapchain, VkFence fence);
+   void destroySwapchainPresentFences(VkSwapchainKHR swapchain);
+diff --git a/intern/ghost/intern/GHOST_ISystem.cc b/intern/ghost/intern/GHOST_ISystem.cc
+index 08a8b8b5f8b..7da121d26ca 100644
+--- a/intern/ghost/intern/GHOST_ISystem.cc
++++ b/intern/ghost/intern/GHOST_ISystem.cc
+@@ -15,7 +15,9 @@
+ #include "GHOST_ISystem.hh"
+ #include "GHOST_SystemHeadless.hh"
+ 
+-#if defined(WITH_GHOST_X11) && defined(WITH_GHOST_WAYLAND)
++#if defined(WITH_GHOST_WEB)
++#  include "GHOST_SystemWeb.hh"
++#elif defined(WITH_GHOST_X11) && defined(WITH_GHOST_WAYLAND)
+ #  include "GHOST_SystemWayland.hh"
+ #  include "GHOST_SystemX11.hh"
+ #elif defined(WITH_GHOST_X11)
+@@ -55,7 +57,9 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
+ 
+   GHOST_TSuccess success;
+   if (!system_) {
+-#if defined(WITH_HEADLESS)
++#if defined(WITH_GHOST_WEB)
++    /* Pass - handled below. */
++#elif defined(WITH_HEADLESS)
+     /* Pass. */
+ #elif defined(WITH_GHOST_WAYLAND)
+ #  if defined(WITH_GHOST_WAYLAND_DYNLOAD)
+@@ -65,7 +69,11 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
+ #  endif
+ #endif
+ 
+-#if defined(WITH_HEADLESS)
++#if defined(WITH_GHOST_WEB)
++    backends_attempted.push_back({"WEB"});
++    CLOG_INFO(&LOG, "Create Web display system");
++    system_ = new GHOST_SystemWeb();
++#elif defined(WITH_HEADLESS)
+     /* Pass. */
+ #elif defined(WITH_GHOST_X11) && defined(WITH_GHOST_WAYLAND)
+     /* Special case, try Wayland, fall back to X11. */

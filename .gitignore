@@ -1,0 +1,9 @@
+# Local Blender install/build output (not part of the repo).
+install/
+build/
+
+# Private working notes.
+research/
+
+__pycache__/
+*.pyc

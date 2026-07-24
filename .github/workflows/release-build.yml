@@ -1,0 +1,83 @@
+name: release-build
+
+# Builds the Windows binaries on a SELF-HOSTED runner and attaches them to the
+# GitHub release. Deliberately NOT triggered by pull requests: on a public
+# repository a self-hosted runner must never execute code from forks. Only tag
+# pushes and the manual "Run workflow" button (both owner-controlled) reach it.
+#
+# One-time runner machine preparation:
+#   1. Register the runner: repo Settings -> Actions -> Runners -> New
+#      self-hosted runner (Windows x64), install it as a service.
+#   2. Provide a dedicated Blender checkout (do NOT point this at your
+#      development tree — the workflow resets/cleans it):
+#        git clone https://projects.blender.org/blender/blender.git H:\blender-ci
+#        git -C H:\blender-ci submodule update --init lib/windows_x64
+#      (Tip: copy lib/windows_x64 from an existing checkout to skip the
+#      multi-GB download, then let git fix it up.)
+#   3. Make sure `cmake`, `git` and Python are on PATH for the runner service,
+#      with Visual Studio 2022 installed.
+#   4. Optional: set a repository variable BLENDER_CI_TREE to override the
+#      default checkout location.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # upload release assets
+
+env:
+  CI_TREE: ${{ vars.BLENDER_CI_TREE || 'H:\blender-ci' }}
+
+jobs:
+  build:
+    runs-on: [self-hosted, Windows]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reset upstream tree to the pinned commit
+        run: |
+          $pinned = (Get-Content UPSTREAM_COMMIT -Raw).Trim()
+          git -C $env:CI_TREE fetch origin
+          git -C $env:CI_TREE checkout --detach $pinned
+          git -C $env:CI_TREE reset --hard
+          git -C $env:CI_TREE clean -fd
+          git -C $env:CI_TREE submodule update --init lib/windows_x64
+
+      - name: Assemble tree (overlay + patches)
+        run: python scripts/setup.py --blender $env:CI_TREE
+
+      - name: Configure
+        run: >
+          cmake -B "$env:CI_TREE\build" -S "$env:CI_TREE"
+          -G "Visual Studio 17 2022" -A x64
+          -DWITH_GHOST_WEB=ON -DWITH_WEB_NVENC=ON
+
+      # The build directory persists between runs on the runner machine, so
+      # rebuilds are incremental. Delete $CI_TREE\build to force a clean build.
+      - name: Build
+        run: cmake --build "$env:CI_TREE\build" --config Release --target INSTALL
+
+      - name: Package
+        run: |
+          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME }
+                  else { $env:GITHUB_SHA.Substring(0, 10) }
+          $zip = "blender-web-$name-windows-x64.zip"
+          Compress-Archive -Path "$env:CI_TREE\build\bin\Release\*" -DestinationPath $zip -Force
+          "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blender-web-windows-x64
+          path: "*.zip"
+
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
+          generate_release_notes: true

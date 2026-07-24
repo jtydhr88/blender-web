@@ -1,0 +1,34 @@
+name: patch-check
+
+# Cheap upstream-drift alarm: fetch the pinned Blender commit (shallow, no
+# libraries — nothing is compiled) and verify the overlay + patch set still
+# assemble cleanly. Runs on the free GitHub-hosted runner in ~2 minutes.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # weekly, catches drift even without pushes
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pinned Blender source (shallow)
+        run: |
+          UPSTREAM=$(tr -d '[:space:]' < UPSTREAM_COMMIT)
+          echo "pinned upstream: $UPSTREAM"
+          git init blender
+          git -C blender remote add origin https://github.com/blender/blender.git
+          git -C blender fetch --depth 1 origin "$UPSTREAM"
+          git -C blender checkout --detach FETCH_HEAD
+
+      - name: Assemble tree (overlay + patches)
+        run: python3 scripts/setup.py --blender blender
+
+      - name: Summary
+        run: |
+          echo "overlay files:" && find blender/extern/nvew blender/intern/ghost/intern -name 'GHOST_*Web*' -o -name 'nvew*' -o -name 'GHOST_Encoder*' | sort
+          git -C blender diff --stat
