@@ -35,7 +35,9 @@ jobs:
     runs-on: [self-hosted, Windows]
     defaults:
       run:
-        shell: pwsh
+        # Windows PowerShell 5.1 — present on every Windows machine; the
+        # runner host does not need PowerShell 7 installed.
+        shell: powershell
     steps:
       - uses: actions/checkout@v4
 
@@ -76,8 +78,8 @@ jobs:
 
       - name: Package
         run: |
-          $name = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME }
-                  else { $env:GITHUB_SHA.Substring(0, 10) }
+          $name = $env:GITHUB_SHA.Substring(0, 10)
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $name = $env:GITHUB_REF_NAME }
           $zip = "blender-web-$name-windows-x64.zip"
           Compress-Archive -Path "$env:CI_TREE\build\bin\Release\*" -DestinationPath $zip -Force
           "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
