@@ -17,9 +17,11 @@ Think Pixel Streaming / cloud gaming, built directly into Blender's windowing la
 
 ## Demo
 
-https://github.com/jtydhr88/blender-web/raw/master/assets/demo1.mp4
+Click a preview to watch the video:
 
-https://github.com/jtydhr88/blender-web/raw/master/assets/demo2.mp4
+[![Demo 1](assets/demo1-poster.jpg)](https://github.com/jtydhr88/blender-web/raw/master/assets/demo1.mp4)
+
+[![Demo 2](assets/demo2-poster.jpg)](https://github.com/jtydhr88/blender-web/raw/master/assets/demo2.mp4)
 
 ```
 ┌────────────────────────── Blender (native) ──────────────────────────┐
