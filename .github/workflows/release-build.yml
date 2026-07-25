@@ -51,16 +51,28 @@ jobs:
       - name: Assemble tree (overlay + patches)
         run: python scripts/setup.py --blender $env:CI_TREE
 
+      # cmake is not necessarily on the service account's PATH; find the one
+      # bundled with Visual Studio / Build Tools.
+      - name: Locate cmake
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $cmake = & $vswhere -latest -products * `
+            -find "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" |
+            Select-Object -First 1
+          if (-not $cmake) { $cmake = "cmake" }
+          "CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
+          & $cmake --version | Select-Object -First 1
+
       - name: Configure
         run: >
-          cmake -B "$env:CI_TREE\build" -S "$env:CI_TREE"
+          & "$env:CMAKE" -B "$env:CI_TREE\build" -S "$env:CI_TREE"
           -G "Visual Studio 17 2022" -A x64
           -DWITH_GHOST_WEB=ON -DWITH_WEB_NVENC=ON
 
       # The build directory persists between runs on the runner machine, so
       # rebuilds are incremental. Delete $CI_TREE\build to force a clean build.
       - name: Build
-        run: cmake --build "$env:CI_TREE\build" --config Release --target INSTALL
+        run: '& "$env:CMAKE" --build "$env:CI_TREE\build" --config Release --target INSTALL'
 
       - name: Package
         run: |
