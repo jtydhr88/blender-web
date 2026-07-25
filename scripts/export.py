@@ -48,6 +48,14 @@ def main():
     if not git(tree, "rev-parse", "--verify", "--quiet", f"{upstream}^{{commit}}").strip():
         sys.exit(f"error: upstream commit {upstream[:12]} not found in {tree}")
 
+    # The branch must sit exactly on the pinned commit, otherwise the diff
+    # below would include unrelated upstream changes.
+    base = git(tree, "merge-base", "HEAD", upstream).strip()
+    if base != upstream:
+        sys.exit(f"error: HEAD is not based on UPSTREAM_COMMIT ({upstream[:12]}).\n"
+                 f"Rebase the branch onto it, or update UPSTREAM_COMMIT first "
+                 f"(merge-base is {base[:12]}).")
+
     dirty = git(tree, "status", "--porcelain").strip()
     if dirty:
         sys.exit("error: development tree has uncommitted changes, commit them first:\n" + dirty)
