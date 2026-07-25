@@ -15,10 +15,6 @@ everything works). A custom GHOST display backend streams the interface to any b
 as low-latency H.264 and feeds browser input back into Blender's native event loop.
 Think Pixel Streaming / cloud gaming, built directly into Blender's windowing layer.
 
-## Demo
-
-Click a preview to watch the video:
-
 https://github.com/user-attachments/assets/ea082be7-db45-451f-b7ab-5c49c9d5b837
 
 https://github.com/user-attachments/assets/8e937825-475b-487d-a336-3d43b485ebea
