@@ -8,10 +8,10 @@ index f6f66a4e48c..1ca466b29b9 100644
  *.blend2
 +build_web/
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 93ff49c347b..1074d4dc1df 100644
+index ed29c9a185f..dfeff170ddd 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -371,6 +371,18 @@ endif()
+@@ -372,6 +372,18 @@ endif()
  option(WITH_HEADLESS "Build without graphical support (renderfarm, server mode only)" OFF)
  mark_as_advanced(WITH_HEADLESS)
  
@@ -30,7 +30,7 @@ index 93ff49c347b..1074d4dc1df 100644
  option(WITH_QUADRIFLOW "Build with QuadriFlow remesher support" ON)
  
  option(WITH_AUDASPACE "Build with Audaspace (base Blender audio library)" ON)
-@@ -1347,14 +1359,18 @@ if(UNIX AND NOT (APPLE OR HAIKU))
+@@ -1359,14 +1371,18 @@ if(UNIX AND NOT (APPLE OR HAIKU))
    set_and_warn_incompatible(WITH_HEADLESS WITH_GHOST_X11 OFF)
  endif()
  set_and_warn_incompatible(WITH_HEADLESS WITH_GHOST_SDL OFF)
@@ -50,7 +50,7 @@ index 93ff49c347b..1074d4dc1df 100644
  if(WITH_UI_TESTS_HEADLESS)
    set_and_warn_dependency(WITH_GHOST_WAYLAND WITH_UI_TESTS_HEADLESS OFF)
 diff --git a/build_files/cmake/platform/platform_win32.cmake b/build_files/cmake/platform/platform_win32.cmake
-index 3b0a244f1e3..74d97f27b22 100644
+index 6ff5ae12b18..634c0364c01 100644
 --- a/build_files/cmake/platform/platform_win32.cmake
 +++ b/build_files/cmake/platform/platform_win32.cmake
 @@ -39,7 +39,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
@@ -63,10 +63,10 @@ index 3b0a244f1e3..74d97f27b22 100644
          "Compiler is unsupported, MSVC 2022 17.14.14 or newer is required for building blender."
        )
 diff --git a/extern/CMakeLists.txt b/extern/CMakeLists.txt
-index 0f4b2e0f508..a6d936de7a2 100644
+index e0f9034bbf1..ef900692766 100644
 --- a/extern/CMakeLists.txt
 +++ b/extern/CMakeLists.txt
-@@ -59,9 +59,18 @@ if(WITH_BINRELOC)
+@@ -60,9 +60,18 @@ if(WITH_BINRELOC)
    add_subdirectory(binreloc)
  endif()
  
@@ -87,7 +87,7 @@ index 0f4b2e0f508..a6d936de7a2 100644
    if(WITH_CYCLES_DEVICE_HIP AND WITH_HIP_DYNLOAD)
      add_subdirectory(hipew)
 diff --git a/intern/ghost/CMakeLists.txt b/intern/ghost/CMakeLists.txt
-index 06fc1409bdf..e1af9f5ccd8 100644
+index ef78a5930fa..9e54a362b18 100644
 --- a/intern/ghost/CMakeLists.txt
 +++ b/intern/ghost/CMakeLists.txt
 @@ -137,7 +137,51 @@ list(APPEND SRC
@@ -144,10 +144,10 @@ index 06fc1409bdf..e1af9f5ccd8 100644
  elseif(WITH_GHOST_SDL)
    list(APPEND SRC
 diff --git a/intern/ghost/intern/GHOST_ContextVK.cc b/intern/ghost/intern/GHOST_ContextVK.cc
-index e92c551608d..e8e1ecdcf82 100644
+index 42ec092cc54..8104e83b930 100644
 --- a/intern/ghost/intern/GHOST_ContextVK.cc
 +++ b/intern/ghost/intern/GHOST_ContextVK.cc
-@@ -923,6 +923,10 @@ GHOST_TSuccess GHOST_ContextVK::swapBufferAcquire()
+@@ -957,6 +957,10 @@ GHOST_TSuccess GHOST_ContextVK::swapBufferAcquire()
      return GHOST_kFailure;
    }
  
@@ -158,7 +158,7 @@ index e92c551608d..e8e1ecdcf82 100644
    GHOST_DeviceVK &device_vk = vulkan_instance->device.value();
    VkDevice vk_device = device_vk.vk_device;
  
-@@ -1073,6 +1077,10 @@ void GHOST_ContextVK::setPresentFence(VkSwapchainKHR swapchain, VkFence present_
+@@ -1107,6 +1111,10 @@ void GHOST_ContextVK::setPresentFence(VkSwapchainKHR swapchain, VkFence present_
  
  GHOST_TSuccess GHOST_ContextVK::swapBufferRelease()
  {
@@ -169,7 +169,7 @@ index e92c551608d..e8e1ecdcf82 100644
    /* Minimized windows don't have a swapchain and swapchain image. In this case we perform the draw
     * to release render graph and discarded resources. */
    if (swapchain_ == VK_NULL_HANDLE) {
-@@ -1637,6 +1645,14 @@ GHOST_TSuccess GHOST_ContextVK::destroySwapchain()
+@@ -1682,6 +1690,14 @@ GHOST_TSuccess GHOST_ContextVK::destroySwapchain()
  {
    GHOST_DeviceVK &device_vk = vulkan_instance.value().device.value();
  
@@ -184,7 +184,7 @@ index e92c551608d..e8e1ecdcf82 100644
    if (swapchain_ != VK_NULL_HANDLE) {
      this->destroySwapchainPresentFences(swapchain_);
      device_vk.functions.vkDestroySwapchainKHR(device_vk.vk_device, swapchain_, nullptr);
-@@ -1657,6 +1673,547 @@ GHOST_TSuccess GHOST_ContextVK::destroySwapchain()
+@@ -1702,6 +1718,547 @@ GHOST_TSuccess GHOST_ContextVK::destroySwapchain()
    return GHOST_kSuccess;
  }
  
@@ -729,14 +729,14 @@ index e92c551608d..e8e1ecdcf82 100644
 +
 +/** \} */
 +
- const char *GHOST_ContextVK::getPlatformSpecificSurfaceExtension() const
+ std::vector<const char *> GHOST_ContextVK::getPlatformSpecificSurfaceExtensions() const
  {
- #ifdef _WIN32
+   std::vector<const char *> extensions;
 diff --git a/intern/ghost/intern/GHOST_ContextVK.hh b/intern/ghost/intern/GHOST_ContextVK.hh
-index 856f959b5bc..72b1233b023 100644
+index b0ba540b2bc..6a192c9f688 100644
 --- a/intern/ghost/intern/GHOST_ContextVK.hh
 +++ b/intern/ghost/intern/GHOST_ContextVK.hh
-@@ -34,8 +34,12 @@
+@@ -37,8 +37,12 @@ struct SDL_Window; /* Avoid pulling in the full SDL3 headers. */
  #  endif
  #endif
  
@@ -749,7 +749,7 @@ index 856f959b5bc..72b1233b023 100644
  #include <vector>
  
  namespace blender {
-@@ -54,6 +58,10 @@ namespace volk {
+@@ -57,6 +61,10 @@ namespace volk {
  struct VolkDeviceTable;
  }
  
@@ -760,7 +760,7 @@ index 856f959b5bc..72b1233b023 100644
  enum GHOST_TVulkanPlatformType {
    GHOST_kVulkanPlatformHeadless = 0,
  #ifdef WITH_GHOST_X11
-@@ -68,6 +76,35 @@ struct GHOST_ContextVK_WindowInfo {
+@@ -71,6 +79,35 @@ struct GHOST_ContextVK_WindowInfo {
    int size[2];
  };
  
@@ -796,7 +796,7 @@ index 856f959b5bc..72b1233b023 100644
  struct GHOST_FrameDiscard {
    std::vector<VkSwapchainKHR> swapchains;
    std::vector<VkSemaphore> semaphores;
-@@ -176,6 +213,48 @@ class GHOST_ContextVK : public GHOST_Context {
+@@ -182,6 +219,48 @@ class GHOST_ContextVK : public GHOST_Context {
  
    GHOST_TSuccess getVulkanSwapChainFormat(GHOST_VulkanSwapChainData *r_swap_chain_data) override;
  
@@ -845,7 +845,7 @@ index 856f959b5bc..72b1233b023 100644
    GHOST_TSuccess setVulkanSwapBuffersCallbacks(
        std::function<void(const GHOST_VulkanSwapChainData *, bool)> swap_buffer_draw_callback,
        std::function<void(void)> swap_buffer_acquired_callback,
-@@ -287,11 +366,52 @@ class GHOST_ContextVK : public GHOST_Context {
+@@ -296,11 +375,52 @@ class GHOST_ContextVK : public GHOST_Context {
    std::vector<VkFence> fence_pile_;
    std::map<VkSwapchainKHR, std::vector<VkFence>> present_fences_;
  
@@ -882,7 +882,7 @@ index 856f959b5bc..72b1233b023 100644
 +  std::deque<uint32_t> virtual_harvest_queue_;
 +  bool virtual_harvest_exit_ = false;
 +
-   const char *getPlatformSpecificSurfaceExtension() const;
+   std::vector<const char *> getPlatformSpecificSurfaceExtensions() const;
    GHOST_TSuccess recreateSwapchain(bool use_hdr_swapchain);
    GHOST_TSuccess initializeFrameData();
    GHOST_TSuccess destroySwapchain();
@@ -899,7 +899,7 @@ index 856f959b5bc..72b1233b023 100644
    void setPresentFence(VkSwapchainKHR swapchain, VkFence fence);
    void destroySwapchainPresentFences(VkSwapchainKHR swapchain);
 diff --git a/intern/ghost/intern/GHOST_ISystem.cc b/intern/ghost/intern/GHOST_ISystem.cc
-index 08a8b8b5f8b..7da121d26ca 100644
+index 14c65299215..b85dae40424 100644
 --- a/intern/ghost/intern/GHOST_ISystem.cc
 +++ b/intern/ghost/intern/GHOST_ISystem.cc
 @@ -15,7 +15,9 @@
@@ -913,7 +913,7 @@ index 08a8b8b5f8b..7da121d26ca 100644
  #  include "GHOST_SystemWayland.hh"
  #  include "GHOST_SystemX11.hh"
  #elif defined(WITH_GHOST_X11)
-@@ -55,7 +57,9 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
+@@ -54,7 +56,9 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
  
    GHOST_TSuccess success;
    if (!system_) {
@@ -924,7 +924,7 @@ index 08a8b8b5f8b..7da121d26ca 100644
      /* Pass. */
  #elif defined(WITH_GHOST_WAYLAND)
  #  if defined(WITH_GHOST_WAYLAND_DYNLOAD)
-@@ -65,7 +69,11 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
+@@ -64,7 +68,11 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
  #  endif
  #endif
  

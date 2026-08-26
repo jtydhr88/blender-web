@@ -171,6 +171,22 @@ animation and FFmpeg video output — served by a small HTTP API (`/render`,
 Blender's main thread. Install it as a regular ComfyUI custom node and point it
 at the Blender instance.
 
+## Blender MCP (AI control)
+
+Because the browser is only a display, the full native addon ecosystem works
+unchanged — including [Blender MCP](https://github.com/ahujasid/blender-mcp).
+Release zips bundle the addon and a launcher:
+
+```powershell
+# instead of blender.exe — same thing, plus the MCP socket on localhost:9876
+.\blender-with-mcp.bat
+```
+
+Point an MCP client at it (e.g. `claude mcp add blender -- uvx blender-mcp`)
+and the assistant can inspect and modify the scene while the browser shows
+every change live. The MCP socket executes Python inside Blender and, like the
+web port, is bound to localhost — do not expose either to untrusted networks.
+
 ## CI
 
 Two workflows split the load between free hosted runners and the maintainer's

@@ -41,14 +41,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows PowerShell 5.1 does not fail a multi-line run block when a
+      # middle command exits non-zero — only the last command's exit code
+      # counts. Check every step explicitly, and verify the final state: a
+      # fetch that silently fails under the service account otherwise leaves
+      # the tree on the OLD base and the build "succeeds" with stale sources.
       - name: Reset upstream tree to the pinned commit
         run: |
           $pinned = (Get-Content UPSTREAM_COMMIT -Raw).Trim()
           git -C $env:CI_TREE fetch origin
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "fetch failed (exit $LASTEXITCODE); trying local objects"
+          }
           git -C $env:CI_TREE checkout --detach $pinned
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C $env:CI_TREE reset --hard
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C $env:CI_TREE clean -fd
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C $env:CI_TREE submodule update --init lib/windows_x64
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $head = (git -C $env:CI_TREE rev-parse HEAD).Trim()
+          if ($head -ne $pinned) { Write-Error "tree is at $head, expected $pinned"; exit 1 }
 
       - name: Assemble tree (overlay + patches)
         run: python scripts/setup.py --blender $env:CI_TREE
@@ -75,6 +89,26 @@ jobs:
       # rebuilds are incremental. Delete $CI_TREE\build to force a clean build.
       - name: Build
         run: '& "$env:CMAKE" --build "$env:CI_TREE\build" --config Release --target INSTALL'
+
+      # The build directory persists between runs, so bin\Release accumulates
+      # versioned asset directories from older upstream bases (e.g. a stale
+      # "5.2" next to the current "5.3"). Keep only the one this build made.
+      - name: Prune stale versioned directories
+        run: |
+          $line = Select-String -Path "$env:CI_TREE\source\blender\blenkernel\BKE_blender_version.h" `
+            -Pattern '#define BLENDER_VERSION\s+(\d+)' | Select-Object -First 1
+          $raw = [int]$line.Matches[0].Groups[1].Value
+          $current = "{0}.{1}" -f [math]::Floor($raw / 100), ($raw % 100)
+          Get-ChildItem "$env:CI_TREE\build\bin\Release" -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+$' -and $_.Name -ne $current } |
+            ForEach-Object { Write-Host "removing stale $($_.Name)"; Remove-Item $_.FullName -Recurse -Force }
+
+      # Ship the Blender MCP addon and a launcher next to blender.exe so AI
+      # assistants can drive the streamed Blender (see tools/blender-mcp/).
+      - name: Bundle Blender MCP launcher
+        run: |
+          Copy-Item "tools\blender-mcp\addon.py" "$env:CI_TREE\build\bin\Release\blender_mcp_addon.py" -Force
+          Copy-Item "tools\blender-mcp\blender-with-mcp.bat" "$env:CI_TREE\build\bin\Release\" -Force
 
       - name: Package
         run: |
