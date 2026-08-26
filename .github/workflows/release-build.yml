@@ -69,15 +69,19 @@ jobs:
 
       # cmake is not necessarily on the service account's PATH; find the one
       # bundled with Visual Studio / Build Tools.
+      # Do not pipe native output into Select-Object -First 1: early pipeline
+      # termination closes the pipe while the process may still be writing,
+      # which intermittently makes it exit non-zero. Collect first, then index.
       - name: Locate cmake
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $cmake = & $vswhere -latest -products * `
-            -find "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" |
-            Select-Object -First 1
-          if (-not $cmake) { $cmake = "cmake" }
+          $paths = @(& $vswhere -latest -products * `
+            -find "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe")
+          $cmake = if ($paths.Count -gt 0) { $paths[0] } else { "cmake" }
           "CMAKE=$cmake" | Out-File $env:GITHUB_ENV -Append -Encoding ascii
-          & $cmake --version | Select-Object -First 1
+          $banner = @(& $cmake --version)
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $banner[0]
 
       - name: Configure
         run: >
@@ -103,20 +107,21 @@ jobs:
             Where-Object { $_.Name -match '^\d+\.\d+$' -and $_.Name -ne $current } |
             ForEach-Object { Write-Host "removing stale $($_.Name)"; Remove-Item $_.FullName -Recurse -Force }
 
-      # Ship the Blender MCP addon and a launcher next to blender.exe so AI
-      # assistants can drive the streamed Blender (see tools/blender-mcp/).
-      - name: Bundle Blender MCP launcher
-        run: |
-          Copy-Item "tools\blender-mcp\addon.py" "$env:CI_TREE\build\bin\Release\blender_mcp_addon.py" -Force
-          Copy-Item "tools\blender-mcp\blender-with-mcp.bat" "$env:CI_TREE\build\bin\Release\" -Force
-
+      # Two variants per release: a plain zip, and an -mcp zip that adds the
+      # Blender MCP addon plus launcher next to blender.exe (see
+      # tools/blender-mcp/). The MCP files are copied in AFTER the plain zip
+      # is closed, so order matters here.
       - name: Package
         run: |
           $name = $env:GITHUB_SHA.Substring(0, 10)
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $name = $env:GITHUB_REF_NAME }
-          $zip = "blender-web-$name-windows-x64.zip"
-          Compress-Archive -Path "$env:CI_TREE\build\bin\Release\*" -DestinationPath $zip -Force
-          "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+          $release = "$env:CI_TREE\build\bin\Release"
+          Remove-Item "$release\blender_mcp_addon.py", "$release\blender-with-mcp.bat" `
+            -Force -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$release\*" -DestinationPath "blender-web-$name-windows-x64.zip" -Force
+          Copy-Item "tools\blender-mcp\addon.py" "$release\blender_mcp_addon.py" -Force
+          Copy-Item "tools\blender-mcp\blender-with-mcp.bat" "$release\" -Force
+          Compress-Archive -Path "$release\*" -DestinationPath "blender-web-$name-mcp-windows-x64.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:

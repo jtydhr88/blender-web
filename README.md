@@ -175,7 +175,8 @@ at the Blender instance.
 
 Because the browser is only a display, the full native addon ecosystem works
 unchanged — including [Blender MCP](https://github.com/ahujasid/blender-mcp).
-Release zips bundle the addon and a launcher:
+Each release ships two zips: a plain one, and an `-mcp` variant that bundles
+the addon and a launcher:
 
 ```powershell
 # instead of blender.exe — same thing, plus the MCP socket on localhost:9876
