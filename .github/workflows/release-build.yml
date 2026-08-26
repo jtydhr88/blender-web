@@ -89,23 +89,20 @@ jobs:
           -G "Visual Studio 17 2022" -A x64
           -DWITH_GHOST_WEB=ON -DWITH_WEB_NVENC=ON
 
-      # The build directory persists between runs on the runner machine, so
-      # rebuilds are incremental. Delete $CI_TREE\build to force a clean build.
+      # The build directory persists between runs (incremental rebuilds), so
+      # bin\Release accumulates leftovers from older bases: versioned asset
+      # directories (a stale "5.2" next to "5.3"), superseded DLLs, files the
+      # newer layout moved elsewhere. Start the output directory from scratch —
+      # the link step and INSTALL repopulate it, so the zip is exactly the
+      # current install set.
+      - name: Clean output directory
+        run: |
+          if (Test-Path "$env:CI_TREE\build\bin\Release") {
+            Remove-Item "$env:CI_TREE\build\bin\Release" -Recurse -Force
+          }
+
       - name: Build
         run: '& "$env:CMAKE" --build "$env:CI_TREE\build" --config Release --target INSTALL'
-
-      # The build directory persists between runs, so bin\Release accumulates
-      # versioned asset directories from older upstream bases (e.g. a stale
-      # "5.2" next to the current "5.3"). Keep only the one this build made.
-      - name: Prune stale versioned directories
-        run: |
-          $line = Select-String -Path "$env:CI_TREE\source\blender\blenkernel\BKE_blender_version.h" `
-            -Pattern '#define BLENDER_VERSION\s+(\d+)' | Select-Object -First 1
-          $raw = [int]$line.Matches[0].Groups[1].Value
-          $current = "{0}.{1}" -f [math]::Floor($raw / 100), ($raw % 100)
-          Get-ChildItem "$env:CI_TREE\build\bin\Release" -Directory |
-            Where-Object { $_.Name -match '^\d+\.\d+$' -and $_.Name -ne $current } |
-            ForEach-Object { Write-Host "removing stale $($_.Name)"; Remove-Item $_.FullName -Recurse -Force }
 
       # Two variants per release: a plain zip, and an -mcp zip that adds the
       # Blender MCP addon plus launcher next to blender.exe (see
