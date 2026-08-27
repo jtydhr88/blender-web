@@ -24,7 +24,6 @@ Endpoints (default port 7684, override with BLENDER_COMFYTV_PORT):
     GET  /comfytv/status            identity + scene summary (probe target)
     GET  /comfytv/cameras           camera datablocks + scene render truth
     POST /comfytv/import            {"path": ...} -> into the ComfyTV collection
-    POST /comfytv/rig/turntable     create an editable orbit rig around the subject
     POST /comfytv/render            {"camera": ..., "mode": "still"|"animation",
                                      "shading": "clay"|"full"}
     GET  /comfytv/jobs/<id>         poll job status/progress/result
@@ -34,7 +33,6 @@ main thread through a bpy.app.timers pump. Renders use INVOKE_DEFAULT so the
 UI (and the web stream) stays live; progress comes from render handlers.
 """
 import json
-import math
 import os
 import threading
 import traceback
@@ -44,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import bpy
 
 PORT = int(os.environ.get("BLENDER_COMFYTV_PORT", "7684"))
-BRIDGE_VERSION = "0.4.0"
+BRIDGE_VERSION = "0.1.0"
 COLLECTION_NAME = "ComfyTV"
 MODEL_EXTENSIONS = ('.glb', '.gltf', '.obj', '.fbx', '.usd', '.usdc', '.usdz')
 
@@ -176,116 +174,6 @@ def _do_import(params: dict) -> dict:
     return {"imported": [o.name for o in imported],
             "collection": COLLECTION_NAME,
             "center": list(center), "radius": radius}
-
-
-def _all_fcurves(action):
-    """Blender 5.x layered actions: fcurves live in channelbags."""
-    for layer in action.layers:
-        for strip in layer.strips:
-            for bag in strip.channelbags:
-                yield from bag.fcurves
-
-
-def _do_rig_turntable(params: dict) -> dict:
-    """Create an orbit rig as real scene objects the user can edit.
-
-    The rig (path + aim target + camera + keyframed Follow Path) is the
-    turntable; tweak it in the viewport like any other objects. Re-running
-    replaces the previous rig.
-    """
-    frames = max(int(params.get("frames", 96)), 2)
-    fps = max(int(params.get("fps", 24)), 1)
-    turns = float(params.get("turns", 1.0))
-    height_deg = float(params.get("height_deg", 20.0))
-    distance_factor = float(params.get("distance_factor", 2.4))
-
-    center, radius = _mesh_bounds()
-    distance = radius * distance_factor
-    height = center.z + distance * math.sin(math.radians(height_deg))
-
-    for name in ("Turntable Path", "Turntable Target", "Turntable Camera"):
-        obj = bpy.data.objects.get(name)
-        if obj:
-            bpy.data.objects.remove(obj, do_unlink=True)
-
-    _ensure_studio()
-
-    curve = bpy.data.curves.new("Turntable Path", 'CURVE')
-    curve.dimensions = '3D'
-    spline = curve.splines.new('BEZIER')
-    spline.bezier_points.add(3)
-    orbit_r = distance * math.cos(math.radians(height_deg))
-    handle = orbit_r * 4 * (math.sqrt(2) - 1) / 3  # circle-from-4-beziers constant
-    coords = [(orbit_r, 0), (0, orbit_r), (-orbit_r, 0), (0, -orbit_r)]
-    tangents = [(0, 1), (-1, 0), (0, -1), (1, 0)]
-    for i, ((x, y), (tx, ty)) in enumerate(zip(coords, tangents)):
-        pt = spline.bezier_points[i]
-        pt.co = (x, y, 0)
-        pt.handle_left = (x - tx * handle, y - ty * handle, 0)
-        pt.handle_right = (x + tx * handle, y + ty * handle, 0)
-    spline.use_cyclic_u = True
-    curve.use_path = True
-    path = bpy.data.objects.new("Turntable Path", curve)
-    path.location = (center.x, center.y, height)
-    path.rotation_euler = (0, 0, math.radians(float(params.get("azimuth_deg", 0.0))))
-    bpy.context.collection.objects.link(path)
-
-    target = bpy.data.objects.new("Turntable Target", None)
-    target.location = center
-    bpy.context.collection.objects.link(target)
-
-    cam_data = bpy.data.cameras.new("Turntable Camera")
-    cam_data.lens = float(params.get("lens", 42.0))
-    cam = bpy.data.objects.new("Turntable Camera", cam_data)
-    bpy.context.collection.objects.link(cam)
-
-    follow = cam.constraints.new('FOLLOW_PATH')
-    follow.target = path
-    follow.use_fixed_location = True
-    track = cam.constraints.new('TRACK_TO')
-    track.target = target
-    track.track_axis = 'TRACK_NEGATIVE_Z'
-    track.up_axis = 'UP_Y'
-
-    scene = bpy.context.scene
-    scene.frame_start = 1
-    scene.frame_end = frames
-    scene.render.fps = fps
-    scene.camera = cam
-
-    follow.offset_factor = 0.0
-    follow.keyframe_insert('offset_factor', frame=1)
-    follow.offset_factor = turns
-    follow.keyframe_insert('offset_factor', frame=frames)
-    for fc in _all_fcurves(cam.animation_data.action):
-        for kp in fc.keyframe_points:
-            kp.interpolation = 'LINEAR'
-        fc.extrapolation = 'LINEAR'
-
-    return {"camera": cam.name, "path": path.name, "frames": frames, "fps": fps,
-            "center": list(center), "radius": radius}
-
-
-def _ensure_studio():
-    """Minimal three-point studio if the scene has no lights."""
-    if any(o.type == 'LIGHT' for o in bpy.data.objects):
-        return
-    center, radius = _mesh_bounds()
-    rigs = [
-        ("BridgeKey", (radius * 3, -radius * 2.5, radius * 3.5), 900, (1.0, 0.97, 0.92)),
-        ("BridgeFill", (-radius * 3.5, -radius * 1.5, radius * 2), 300, (0.75, 0.82, 1.0)),
-        ("BridgeRim", (0, radius * 4, radius * 2.5), 500, (1.0, 1.0, 1.0)),
-    ]
-    for name, offset, energy, color in rigs:
-        data = bpy.data.lights.new(name, 'AREA')
-        data.energy = energy * max(radius, 1.0)
-        data.size = radius * 2.5
-        data.color = color
-        light = bpy.data.objects.new(name, data)
-        light.location = [center[i] + offset[i] for i in range(3)]
-        bpy.context.collection.objects.link(light)
-        direction = center - light.location
-        light.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
 
 
 def _job_update(job_id: str, **fields):
@@ -435,7 +323,6 @@ def _start_render_job(job_id: str, params: dict):
 _SYNC_ACTIONS = {
     "import": _do_import,
     "cameras": _list_cameras,
-    "rig_turntable": _do_rig_turntable,
 }
 
 
@@ -634,8 +521,6 @@ class _Handler(BaseHTTPRequestHandler):
             params = self._body()
             if self.path == "/comfytv/import":
                 self._reply(200, _run_sync("import", params))
-            elif self.path == "/comfytv/rig/turntable":
-                self._reply(200, _run_sync("rig_turntable", params))
             elif self.path == "/comfytv/render":
                 job_id = uuid.uuid4().hex
                 with _jobs_lock:
