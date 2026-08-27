@@ -104,21 +104,26 @@ jobs:
       - name: Build
         run: '& "$env:CMAKE" --build "$env:CI_TREE\build" --config Release --target INSTALL'
 
-      # Two variants per release: a plain zip, and an -mcp zip that adds the
-      # Blender MCP addon plus launcher next to blender.exe (see
-      # tools/blender-mcp/). The MCP files are copied in AFTER the plain zip
-      # is closed, so order matters here.
+      # Three variants per release, each a superset of the previous: a plain
+      # zip; an -mcp zip that adds the Blender MCP addon plus launcher (see
+      # tools/blender-mcp/); and a -comfytv zip that further adds the ComfyTV
+      # bridge plus launcher (see comfytv-bridge/). Files are copied in AFTER
+      # the previous zip is closed, so order matters here.
       - name: Package
         run: |
           $name = $env:GITHUB_SHA.Substring(0, 10)
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $name = $env:GITHUB_REF_NAME }
           $release = "$env:CI_TREE\build\bin\Release"
-          Remove-Item "$release\blender_mcp_addon.py", "$release\blender-with-mcp.bat" `
+          Remove-Item "$release\blender_mcp_addon.py", "$release\blender-with-mcp.bat", `
+            "$release\blender_comfytv_bridge.py", "$release\blender-for-comfytv.bat" `
             -Force -ErrorAction SilentlyContinue
           Compress-Archive -Path "$release\*" -DestinationPath "blender-web-$name-windows-x64.zip" -Force
           Copy-Item "tools\blender-mcp\addon.py" "$release\blender_mcp_addon.py" -Force
           Copy-Item "tools\blender-mcp\blender-with-mcp.bat" "$release\" -Force
           Compress-Archive -Path "$release\*" -DestinationPath "blender-web-$name-mcp-windows-x64.zip" -Force
+          Copy-Item "comfytv-bridge\blender_comfytv_bridge.py" "$release\" -Force
+          Copy-Item "comfytv-bridge\blender-for-comfytv.bat" "$release\" -Force
+          Compress-Archive -Path "$release\*" -DestinationPath "blender-web-$name-comfytv-windows-x64.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
