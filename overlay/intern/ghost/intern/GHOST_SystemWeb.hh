@@ -124,6 +124,9 @@ class GHOST_SystemWeb : public GHOST_System {
   void acceptNewClients();
   void readClientData();
   void processInputEvent(const std::string &json_str);
+  /** Reconcile modifier state from a pointer message's modifier flags,
+   * synthesizing key events for any drift (lost key-ups). */
+  void syncModifierState(const std::string &json_str, GHOST_IWindow *window, uint64_t ms);
   void removeClient(socket_t sock);
 
   /** Send a WebSocket frame (binary or text). */

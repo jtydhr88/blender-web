@@ -789,6 +789,7 @@ bool GHOST_SystemWeb::serveHTTP(socket_t sock, const std::string &request)
         << "Content-Type: image/jpeg\r\n"
         << "Content-Length: " << capture_jpeg_.size() << "\r\n"
         << "Access-Control-Allow-Origin: *\r\n"
+        << "Cross-Origin-Resource-Policy: cross-origin\r\n"
         << "Connection: close\r\n"
         << "\r\n";
     std::string header = hdr.str();
@@ -810,6 +811,11 @@ bool GHOST_SystemWeb::serveHTTP(socket_t sock, const std::string &request)
        << "Content-Type: " << content_type << "\r\n"
        << "Content-Length: " << strlen(body) << "\r\n"
        << "Access-Control-Allow-Origin: *\r\n"
+       /* Embeddable in cross-origin-isolated pages (COEP), e.g. ComfyUI/ComfyTV
+        * embedding the viewport in an iframe: the framed document must carry
+        * CORP and declare a COEP of its own. */
+       << "Cross-Origin-Resource-Policy: cross-origin\r\n"
+       << "Cross-Origin-Embedder-Policy: credentialless\r\n"
        << "Connection: close\r\n"
        << "\r\n"
        << body;
@@ -896,6 +902,52 @@ bool GHOST_SystemWeb::processEvents(bool /*waitForEvent*/)
   return has_events;
 }
 
+void GHOST_SystemWeb::syncModifierState(const std::string &json,
+                                        GHOST_IWindow *window,
+                                        uint64_t ms)
+{
+  /* Only messages that explicitly carry modifier flags participate: older
+   * clients would otherwise read as all-released and break held modifiers. */
+  if (!json_get_bool(json, "hasMods")) {
+    return;
+  }
+  /* Browser pointer events report live modifier state. When it disagrees
+   * with ours, a key-up was lost (focus change, browser shortcut, page
+   * reload mid-hold) — synthesize the missing transition so Blender's
+   * event state can never keep a modifier stuck down ("wheel scrolls the
+   * timeline" = phantom Alt). On release, both L/R variants go up since
+   * browser flags do not distinguish sides. */
+  const struct {
+    const char *field;
+    bool *state;
+    GHOST_TKey key_l;
+    GHOST_TKey key_r;
+  } mods[] = {
+      {"shiftKey", &mod_shift_, GHOST_kKeyLeftShift, GHOST_kKeyRightShift},
+      {"ctrlKey", &mod_ctrl_, GHOST_kKeyLeftControl, GHOST_kKeyRightControl},
+      {"altKey", &mod_alt_, GHOST_kKeyLeftAlt, GHOST_kKeyRightAlt},
+      {"metaKey", &mod_os_, GHOST_kKeyLeftOS, GHOST_kKeyRightOS},
+  };
+  for (const auto &m : mods) {
+    const bool now = json_get_bool(json, m.field);
+    if (now == *m.state) {
+      continue;
+    }
+    *m.state = now;
+    const char utf8_buf[6] = {};
+    if (now) {
+      pushEvent(std::make_unique<GHOST_EventKey>(
+          ms, GHOST_kEventKeyDown, window, m.key_l, false, utf8_buf));
+    }
+    else {
+      pushEvent(std::make_unique<GHOST_EventKey>(
+          ms, GHOST_kEventKeyUp, window, m.key_l, false, utf8_buf));
+      pushEvent(std::make_unique<GHOST_EventKey>(
+          ms, GHOST_kEventKeyUp, window, m.key_r, false, utf8_buf));
+    }
+  }
+}
+
 void GHOST_SystemWeb::processInputEvent(const std::string &json)
 {
   std::string type = json_get_string(json, "type");
@@ -914,6 +966,7 @@ void GHOST_SystemWeb::processInputEvent(const std::string &json)
   uint64_t ms = getMilliSeconds();
 
   if (type == "mousemove") {
+    syncModifierState(json, window, ms);
     int32_t x = (int32_t)json_get_number(json, "x");
     int32_t y = (int32_t)json_get_number(json, "y");
     cursor_x_ = x;
@@ -922,6 +975,7 @@ void GHOST_SystemWeb::processInputEvent(const std::string &json)
         ms, GHOST_kEventCursorMove, window, x, y, GHOST_TABLET_DATA_NONE));
   }
   else if (type == "mousedown" || type == "mouseup") {
+    syncModifierState(json, window, ms);
     int32_t x = (int32_t)json_get_number(json, "x");
     int32_t y = (int32_t)json_get_number(json, "y");
     int button = (int)json_get_number(json, "button");
@@ -952,9 +1006,22 @@ void GHOST_SystemWeb::processInputEvent(const std::string &json)
         ms, etype, window, gbtn, GHOST_TABLET_DATA_NONE));
   }
   else if (type == "wheel") {
+    syncModifierState(json, window, ms);
     int32_t deltaY = (int32_t)json_get_number(json, "deltaY");
     /* Browser deltaY: positive = scroll down, Blender wheel: positive = up. */
     int32_t ticks = (deltaY > 0) ? -1 : 1;
+    /* Wheel events carry no position; Blender routes them to the area under
+     * its last known cursor. Sync the cursor from the browser first, so a
+     * stale event-state can never send the scroll to another editor (the
+     * "wheel scrolls the timeline while hovering the viewport" bug). */
+    int32_t x = (int32_t)json_get_number(json, "x");
+    int32_t y = (int32_t)json_get_number(json, "y");
+    if (x != cursor_x_ || y != cursor_y_) {
+      cursor_x_ = x;
+      cursor_y_ = y;
+      pushEvent(std::make_unique<GHOST_EventCursor>(
+          ms, GHOST_kEventCursorMove, window, x, y, GHOST_TABLET_DATA_NONE));
+    }
     pushEvent(std::make_unique<GHOST_EventWheel>(
         ms, window, GHOST_kEventWheelAxisVertical, ticks));
   }
@@ -970,14 +1037,16 @@ void GHOST_SystemWeb::processInputEvent(const std::string &json)
     mod_alt_ = json_get_bool(json, "altKey");
     mod_os_ = json_get_bool(json, "metaKey");
 
-    /* Get UTF-8 character. */
-    std::string key_char = json_get_string(json, "key");
+    /* Get UTF-8 character (key-down only: GHOST asserts on key-up text). */
     char utf8_buf[6] = {};
-    if (key_char.size() == 1) {
-      utf8_buf[0] = key_char[0];
-    }
-    else if (key_char.size() > 1 && key_char.size() <= 4) {
-      memcpy(utf8_buf, key_char.c_str(), std::min(key_char.size(), (size_t)6));
+    if (etype == GHOST_kEventKeyDown) {
+      std::string key_char = json_get_string(json, "key");
+      if (key_char.size() == 1) {
+        utf8_buf[0] = key_char[0];
+      }
+      else if (key_char.size() > 1 && key_char.size() <= 4) {
+        memcpy(utf8_buf, key_char.c_str(), std::min(key_char.size(), (size_t)6));
+      }
     }
 
     pushEvent(std::make_unique<GHOST_EventKey>(
@@ -1668,23 +1737,30 @@ const char *GHOST_SystemWeb::getClientJS()
 
   /* --- Input event handlers --- */
 
+  /* Live modifier flags ride on every pointer message so the server can
+   * recover from lost key-ups (focus changes, browser shortcuts). */
+  function mods(e) {
+    return { hasMods: true, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey,
+             altKey: e.altKey, metaKey: e.metaKey };
+  }
+
   canvas.addEventListener('mousemove', function(e) {
-    send({ type: 'mousemove', x: e.offsetX, y: e.offsetY });
+    send(Object.assign({ type: 'mousemove', x: e.offsetX, y: e.offsetY }, mods(e)));
   });
 
   canvas.addEventListener('mousedown', function(e) {
     e.preventDefault();
-    send({ type: 'mousedown', button: e.button, x: e.offsetX, y: e.offsetY });
+    send(Object.assign({ type: 'mousedown', button: e.button, x: e.offsetX, y: e.offsetY }, mods(e)));
   });
 
   canvas.addEventListener('mouseup', function(e) {
     e.preventDefault();
-    send({ type: 'mouseup', button: e.button, x: e.offsetX, y: e.offsetY });
+    send(Object.assign({ type: 'mouseup', button: e.button, x: e.offsetX, y: e.offsetY }, mods(e)));
   });
 
   canvas.addEventListener('wheel', function(e) {
     e.preventDefault();
-    send({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY, x: e.offsetX, y: e.offsetY });
+    send(Object.assign({ type: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY, x: e.offsetX, y: e.offsetY }, mods(e)));
   }, { passive: false });
 
   canvas.addEventListener('contextmenu', function(e) {
